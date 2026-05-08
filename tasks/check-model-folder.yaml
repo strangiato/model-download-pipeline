@@ -1,0 +1,160 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-model-folder
+spec:
+  description: >
+    Decide whether to download from S3 into the PVC: skip when the model folder
+    already has files, unless you force a re-download. Prints a clear summary and
+    lists what is on disk for the model path.
+
+  params:
+    - name: pvc-name
+      type: string
+      description: Name of the PersistentVolumeClaim to mount at /mnt/model-data
+
+    - name: MODEL_SUBPATH
+      type: string
+      description: Folder on the mounted PVC to inspect (relative path under the mount, e.g. models)
+      default: models
+
+    - name: FORCE_DOWNLOAD
+      type: string
+      description: Set to "true" to always download from S3, even if the folder already has files
+      default: "false"
+
+  volumes:
+    - name: model-pvc
+      persistentVolumeClaim:
+        claimName: $(params.pvc-name)
+
+  results:
+    - name: should-download
+      type: string
+      description: Pipeline wiring — "true" means run the S3 download task; "false" means skip it
+    - name: folder-status
+      type: string
+      description: Short status for automation — forced, missing, empty, or populated
+
+  steps:
+    - name: check
+      image: busybox:1.36
+      workingDir: /mnt/model-data
+      volumeMounts:
+        - name: model-pvc
+          mountPath: /mnt/model-data
+      script: |
+        #!/bin/sh
+        set -eu
+
+        RESULT_SHOULD_DOWNLOAD="$(results.should-download.path)"
+        RESULT_FOLDER_STATUS="$(results.folder-status.path)"
+        FORCE="$(params.FORCE_DOWNLOAD)"
+        MODEL_DIR="$(params.MODEL_SUBPATH)"
+
+        LINE='======================================================================'
+
+        echo ""
+        echo "$LINE"
+        echo "  Check model folder"
+        echo "$LINE"
+        echo ""
+        echo "  Inputs"
+        echo "  ------"
+        echo "  PVC mount path       : $(pwd)"
+        echo "  Model folder        : ${MODEL_DIR}"
+        echo "  Force download      : ${FORCE}"
+        echo ""
+
+        write_download() {
+          echo -n "$1" >"$RESULT_SHOULD_DOWNLOAD"
+        }
+
+        write_status() {
+          echo -n "$1" >"$RESULT_FOLDER_STATUS"
+        }
+
+        human_summary() {
+          echo ""
+          echo "  Summary"
+          echo "  -------"
+          echo "  Run S3 download?    : $1"
+          echo "  Why                 : $2"
+          echo "  Result folder-status: $3"
+          echo ""
+          echo "$LINE"
+          echo ""
+        }
+
+        case "$FORCE" in
+          true|TRUE|True)
+            write_download true
+            write_status forced
+            human_summary "Yes" "You turned on force download — always fetch from S3." "forced"
+            exit 0
+            ;;
+        esac
+
+        if [ ! -d "$MODEL_DIR" ]; then
+          write_download true
+          write_status missing
+          human_summary "Yes" "Folder \"${MODEL_DIR}\" is not there yet — nothing to reuse." "missing"
+          exit 0
+        fi
+
+        if [ -z "$(ls -A "$MODEL_DIR" 2>/dev/null || true)" ]; then
+          write_download true
+          write_status empty
+          human_summary "Yes" "Folder \"${MODEL_DIR}\" exists but is empty — need objects from S3." "empty"
+          exit 0
+        fi
+
+        write_download false
+        write_status populated
+        human_summary "No" "Folder \"${MODEL_DIR}\" already has files — skipping download unless forced." "populated"
+
+    - name: list-contents
+      image: busybox:1.36
+      workingDir: /mnt/model-data
+      volumeMounts:
+        - name: model-pvc
+          mountPath: /mnt/model-data
+      script: |
+        #!/bin/sh
+        set -eu
+
+        MODEL_DIR="$(params.MODEL_SUBPATH)"
+        LINE='======================================================================'
+
+        echo ""
+        echo "$LINE"
+        echo "  What is on the PVC under the model folder?"
+        echo "$LINE"
+        echo ""
+        echo "  PVC mount path   : $(pwd)"
+        echo "  Looking at      : ${MODEL_DIR}"
+        echo ""
+
+        if [ ! -e "$MODEL_DIR" ]; then
+          echo "  Nothing here — this path does not exist yet."
+          echo ""
+          echo "$LINE"
+          exit 0
+        fi
+
+        if [ ! -d "$MODEL_DIR" ]; then
+          echo "  Note: \"${MODEL_DIR}\" is a file, not a folder."
+          echo ""
+          ls -laF "$MODEL_DIR"
+          echo ""
+          echo "$LINE"
+          exit 0
+        fi
+
+        echo "  Listing $MODEL_DIR"
+        echo "  -----------------"
+        ls -laFhR "$MODEL_DIR"
+        echo ""
+        echo "$LINE"
+        echo ""
+

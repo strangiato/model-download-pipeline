@@ -1,0 +1,145 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: s3-to-pvc
+spec:
+  description: >
+    Download files from an S3 bucket/prefix to a mounted PVC using boto3.
+
+  params:
+    - name: pvc-name
+      type: string
+      description: Name of the PersistentVolumeClaim to mount at /mnt/model-data
+
+    - name: S3_SECRET_NAME
+      type: string
+      description: Secret holding AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_S3_BUCKET, AWS_S3_ENDPOINT, AWS_DEFAULT_REGION
+      default: s3-example
+
+    - name: S3_SOURCE_PATH
+      type: string
+      description: S3 folder/prefix to copy (e.g. data/input/)
+
+    - name: TARGET_DIR
+      type: string
+      description: Target directory under the PVC mount (e.g. models)
+      default: models
+
+  volumes:
+    - name: model-pvc
+      persistentVolumeClaim:
+        claimName: $(params.pvc-name)
+
+  steps:
+    - name: download-from-s3
+      image: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/s2i-generic-data-science-notebook:3.4
+      workingDir: /mnt/model-data
+      volumeMounts:
+        - name: model-pvc
+          mountPath: /mnt/model-data
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.S3_SECRET_NAME)
+              key: AWS_ACCESS_KEY_ID
+
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.S3_SECRET_NAME)
+              key: AWS_SECRET_ACCESS_KEY
+
+        - name: AWS_S3_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: $(params.S3_SECRET_NAME)
+              key: AWS_S3_BUCKET
+
+        - name: S3_ENDPOINT_URL
+          valueFrom:
+            secretKeyRef:
+              name: $(params.S3_SECRET_NAME)
+              key: AWS_S3_ENDPOINT
+              optional: true
+
+        - name: AWS_DEFAULT_REGION
+          valueFrom:
+            secretKeyRef:
+              name: $(params.S3_SECRET_NAME)
+              key: AWS_DEFAULT_REGION
+              optional: true
+
+      script: |
+        #!/usr/bin/env python3
+        import os
+        import subprocess
+        import sys
+
+        # Install boto3 at runtime
+        # subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "boto3"])
+
+        import boto3
+        from botocore.config import Config
+        from pathlib import PurePosixPath
+
+        bucket = os.environ["AWS_S3_BUCKET"]
+        prefix = "$(params.S3_SOURCE_PATH)"
+        target_dir = "$(params.TARGET_DIR)"
+
+        os.makedirs(target_dir, exist_ok=True)
+
+        def normalize_s3_endpoint(url):
+            if not url:
+                return None
+            url = url.strip()
+            if not url:
+                return None
+            # boto needs https://host not s3://host
+            if url.startswith("s3://"):
+                url = "https://" + url.removeprefix("s3://")
+            elif "://" not in url:
+                url = "https://" + url
+            return url.rstrip("/")
+
+        endpoint_url = normalize_s3_endpoint(os.getenv("S3_ENDPOINT_URL"))
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            config=Config(signature_version="s3v4")
+        )
+
+        paginator = s3.get_paginator("list_objects_v2")
+
+        print(f"Downloading s3://{bucket}/{prefix} → {target_dir}")
+
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+
+                # Skip "folders"
+                if key.endswith("/"):
+                    continue
+
+                key_path = PurePosixPath(key)
+                base = PurePosixPath(prefix.rstrip("/") or ".")
+                try:
+                    rel = key_path.relative_to(base)
+                except ValueError:
+                    rel = key_path
+                rel_path = (
+                    key_path.name if rel == PurePosixPath(".") else rel.as_posix()
+                ).lstrip("/")
+                if not rel_path:
+                    continue
+                local_path = os.path.join(target_dir, rel_path)
+
+                parent = os.path.dirname(local_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+
+                print(f"Downloading {key} → {local_path}")
+                s3.download_file(bucket, key, local_path)
+
+        print("Download complete.")

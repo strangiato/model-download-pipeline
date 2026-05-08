@@ -1,0 +1,75 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: create-pvc
+spec:
+  description: >
+    Create a PersistentVolumeClaim in the current namespace by rendering template.json
+    with jq --arg and oc apply -f. Run only when check-pvc-exists says should-create=true.
+    The cli-image must include oc and jq on PATH.
+
+  params:
+    - name: pvc-name
+      type: string
+      description: metadata.name of the PersistentVolumeClaim
+
+    - name: storage-size
+      type: string
+      description: spec.resources.requests.storage (e.g. 10Gi)
+      default: "10Gi"
+
+    - name: storage-class
+      type: string
+      description: Optional storageClassName; empty uses the cluster default storage class
+      default: ""
+
+  steps:
+    - name: render-and-apply
+      image: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
+      script: |
+        #!/bin/sh
+        set -eu
+
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+        PVC="$(params.pvc-name)"
+        SIZE="$(params.storage-size)"
+        CLASS="$(params.storage-class)"
+
+        command -v jq >/dev/null 2>&1 || {
+          echo "error: jq must be on PATH in cli-image"; exit 1
+        }
+
+        cat <<'EOF' | sed 's/^        //' >/tmp/template.json
+        {
+          "apiVersion": "v1",
+          "kind": "PersistentVolumeClaim",
+          "metadata": {
+            "name": "_"
+          },
+          "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {
+              "requests": {
+                "storage": "_"
+              }
+            }
+          }
+        }
+        EOF
+
+        jq \
+          --arg pvc "${PVC}" \
+          --arg size "${SIZE}" \
+          --arg class "${CLASS}" \
+          '
+            .metadata.name = $pvc |
+            .spec.resources.requests.storage = $size |
+            if (($class != "") and ($class != "-")) then .spec.storageClassName = $class else . end
+          ' \
+          /tmp/template.json >/tmp/pvc.json
+
+        echo "--- /tmp/pvc.json ---"
+        cat /tmp/pvc.json
+        echo "---"
+
+        oc apply -f /tmp/pvc.json -n "${NS}"

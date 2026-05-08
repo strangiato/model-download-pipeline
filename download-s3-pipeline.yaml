@@ -1,0 +1,90 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: download-s3-pipeline
+spec:
+  params:
+    - description: Name of the PersistentVolumeClaim where models are stored
+      name: pvc-name
+      type: string
+    - default: "10Gi"
+      description: PVC size when create-pvc creates the claim
+      name: pvc-storage-size
+      type: string
+    - default: folder-in-bucket
+      description: The path to the model in S3
+      name: s3_mode_path
+      type: string
+    - default: "false"
+      description: If true, always run the S3 download even when the model folder already exists and is non-empty
+      name: force_download
+      type: string
+  tasks:
+    - name: check-pvc-exists
+      params:
+        - name: pvc-name
+          value: $(params.pvc-name)
+      taskRef:
+        kind: Task
+        name: check-pvc-exists
+    - name: create-pvc
+      params:
+        - name: pvc-name
+          value: $(params.pvc-name)
+        - name: storage-size
+          value: $(params.pvc-storage-size)
+      runAfter:
+        - check-pvc-exists
+      taskRef:
+        kind: Task
+        name: create-pvc
+      when:
+        - input: "$(tasks.check-pvc-exists.results.should-create)"
+          operator: in
+          values: ["true"]
+    - name: check-model-folder
+      params:
+        - name: pvc-name
+          value: $(params.pvc-name)
+        - name: MODEL_SUBPATH
+          value: models
+        - name: FORCE_DOWNLOAD
+          value: $(params.force_download)
+      runAfter:
+        - check-pvc-exists
+        - create-pvc
+      taskRef:
+        kind: Task
+        name: check-model-folder
+    - name: s3-to-pvc
+      params:
+        - name: pvc-name
+          value: $(params.pvc-name)
+        - name: S3_SECRET_NAME
+          value: minio
+        - name: S3_SOURCE_PATH
+          value: $(params.s3_mode_path)
+        - name: TARGET_DIR
+          value: models
+      runAfter:
+        - check-model-folder
+      taskRef:
+        kind: Task
+        name: s3-to-pvc
+      when:
+        - input: "$(tasks.check-model-folder.results.should-download)"
+          operator: in
+          values: ["true"]
+    - name: list-directory
+      params:
+        - name: pvc-name
+          value: $(params.pvc-name)
+        - name: SUBPATH
+          value: models
+      runAfter:
+        - check-model-folder
+        - s3-to-pvc
+      taskRef:
+        kind: Task
+        name: list-directory
+  finally: []

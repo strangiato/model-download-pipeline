@@ -1,0 +1,44 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-pvc-exists
+spec:
+  description: >
+    Determine whether a PersistentVolumeClaim is missing in the current namespace
+    (TaskRun namespace). Emits should-create=true when the PVC must be applied.
+
+  params:
+    - name: cli-image
+      type: string
+      description: Image containing oc on PATH
+      default: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
+
+    - name: pvc-name
+      type: string
+      description: metadata.name of the PersistentVolumeClaim to look up
+
+  results:
+    - name: should-create
+      type: string
+      description: '"true" if the PVC does not exist and create-pvc should run, "false" if it already exists'
+
+  steps:
+    - name: check
+      image: $(params.cli-image)
+      script: |
+        #!/bin/sh
+        set -eu
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+        PVC="$(params.pvc-name)"
+        OUT="$(results.should-create.path)"
+
+        echo "Looking up PVC \"${PVC}\" in namespace \"${NS}\"..."
+
+        if oc get pvc "${PVC}" -n "${NS}" >/dev/null 2>&1; then
+          echo -n "false" >"$OUT"
+          echo "PVC already exists — create step can be skipped."
+          oc get pvc "${PVC}" -n "${NS}" -o wide
+        else
+          echo -n "true" >"$OUT"
+          echo "PVC not found — a create task may run."
+        fi
