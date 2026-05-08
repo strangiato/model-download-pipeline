@@ -8,11 +8,6 @@ spec:
     (TaskRun namespace). Emits should-create=true when the PVC must be applied.
 
   params:
-    - name: cli-image
-      type: string
-      description: Image containing oc on PATH
-      default: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
-
     - name: pvc-name
       type: string
       description: metadata.name of the PersistentVolumeClaim to look up
@@ -24,7 +19,7 @@ spec:
 
   steps:
     - name: check
-      image: $(params.cli-image)
+      image: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
       script: |
         #!/bin/sh
         set -eu
